@@ -32,6 +32,9 @@ jobs:
         run: |
           set -euo pipefail
           godot --version
+          # The checkout is owned by GitHub runner; CI container uses root.
+          # Explicitly trust only the current checkout directory.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git rev-parse HEAD
           test -f project.godot
           test -f scripts/web_ui/web_adventure_screen.gd
