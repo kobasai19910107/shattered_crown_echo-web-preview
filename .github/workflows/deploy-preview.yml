@@ -151,8 +151,10 @@ jobs:
     environment:
       name: github-pages
     steps:
-      - name: Configure Pages for preview repository
+      - name: Configure or enable Pages for preview repository
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - name: Deploy this repository's Pages only
         id: deployment
         uses: actions/deploy-pages@v4
