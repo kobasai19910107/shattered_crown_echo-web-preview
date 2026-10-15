@@ -1,0 +1,155 @@
+name: Build and publish iPhone Web preview
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: sce-web-preview-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test isolated Web preview
+    runs-on: ubuntu-24.04
+    container:
+      image: barichello/godot-ci:4.7.2
+    steps:
+      - name: Checkout Web UI source read-only
+        uses: actions/checkout@v4
+        with:
+          repository: kobasai19910107/shattered_crown_echo
+          ref: feature/web-ui-v0-6
+          persist-credentials: false
+
+      - name: Check approved Web source
+        shell: bash
+        run: |
+          set -euo pipefail
+          godot --version
+          git rev-parse HEAD
+          test -f project.godot
+          test -f scripts/web_ui/web_adventure_screen.gd
+          test -f scripts/web_ui/web_orientation_curtain.gd
+
+      - name: Install Godot 4.7.2 export templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE=/root/.local/share/godot/export_templates/4.7.2.stable
+          TARGET="$HOME/.local/share/godot/export_templates/4.7.2.stable"
+          if [ ! -d "$TARGET" ]; then
+            test -d "$SOURCE"
+            mkdir -p "$(dirname "$TARGET")"
+            cp -a "$SOURCE" "$TARGET"
+          fi
+
+      - name: Fetch licensed Japanese UI font
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl ca-certificates python3
+          fi
+          mkdir -p assets/fonts
+          curl --fail --location --retry 3 --silent --show-error \
+            'https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf' \
+            --output assets/fonts/NotoSansJP.ttf
+          curl --fail --location --retry 3 --silent --show-error \
+            'https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/OFL.txt' \
+            --output assets/fonts/OFL.txt
+          test "$(stat -c %s assets/fonts/NotoSansJP.ttf)" -gt 1000000
+
+      - name: Give preview a distinct Godot save namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          config=Path("project.godot")
+          text=config.read_text(encoding="utf-8")
+          text, count=re.subn(r'(?m)^config/name="[^"\n]+"$', 'config/name="shattered_crown_echo WEB PREVIEW v0.6"', text, count=1)
+          assert count==1
+          assert '[application]' in text and '[gui]' in text
+          text=text.replace('[application]', '[application]\nconfig/use_custom_user_dir=true\nconfig/custom_user_dir_name="sce_web_preview_v06"', 1)
+          text=text.replace('[gui]', '[gui]\ntheme/custom_font="res://assets/fonts/NotoSansJP.ttf"', 1)
+          config.write_text(text, encoding="utf-8")
+
+          changed=0
+          for path in Path("scripts").rglob("*.gd"):
+              data=path.read_text(encoding="utf-8")
+              n=data.count("user://")
+              if n:
+                  path.write_text(data.replace("user://", "user://sce_web_preview_v06_"), encoding="utf-8")
+                  changed+=n
+          assert changed >= 6, "Could not isolate all expected save paths"
+          assert "user://sce_web_preview_v06_campaign_run_v2.json" in Path("scripts/campaign_controller.gd").read_text(encoding="utf-8")
+          assert "user://sce_web_preview_v06_region1_run_v1.json" in Path("scripts/region1_run_controller.gd").read_text(encoding="utf-8")
+          print("Isolated user:// path references:",changed)
+          PY
+
+      - name: Import Godot resources
+        run: godot --headless --path . --import
+
+      - name: P1 touch and navigation regression
+        run: godot --headless --path . --script res://tests/web_ui_p1_test.gd
+      - name: P2 battle UI regression
+        run: godot --headless --path . --script res://tests/web_ui_p2_test.gd
+      - name: P3 hub and solo departure regression
+        env:
+          SCE_WEB_UI_ISOLATED_TEST: "1"
+        run: godot --headless --path . --script res://tests/web_ui_p3_test.gd
+      - name: P4 equipment forge merchant regression
+        env:
+          SCE_WEB_UI_ISOLATED_TEST: "1"
+        run: godot --headless --path . --script res://tests/web_ui_p4_test.gd
+      - name: P5 adventure and reward regression
+        env:
+          SCE_WEB_UI_ISOLATED_TEST: "1"
+        run: godot --headless --path . --script res://tests/web_ui_p5_test.gd
+
+      - name: Main-scene smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 20s godot --headless --path . --quit-after 100 || status=$?
+          if [ "${status:-0}" = "124" ]; then echo "Startup timeout"; exit 1; fi
+          test "${status:-0}" = "0"
+
+      - name: Export Web game to preview artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/web
+          godot --headless --path . --export-release Web build/web/index.html
+          test -s build/web/index.html
+          test -n "$(find build/web -name '*.wasm' -print -quit)"
+          cp assets/fonts/OFL.txt build/web/FONT_LICENSE_SIL_OFL.txt
+          touch build/web/.nojekyll
+          printf 'preview-repo: shattered_crown_echo-web-preview\nsource: feature/web-ui-v0-6\ncommit: %s\n' "$(git rev-parse HEAD)" > build/web/PREVIEW_BUILD_INFO.txt
+
+      - name: Upload pages artifact for preview repository
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: build/web
+
+  deploy:
+    name: Deploy preview (never changes production site)
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+    steps:
+      - name: Configure Pages for preview repository
+        uses: actions/configure-pages@v5
+      - name: Deploy this repository's Pages only
+        id: deployment
+        uses: actions/deploy-pages@v4
