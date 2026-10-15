@@ -119,6 +119,9 @@ jobs:
           SCE_WEB_UI_ISOLATED_TEST: "1"
         run: godot --headless --path . --script res://tests/web_ui_p5_test.gd
 
+      - name: P6 compact iPhone hub geometry
+        run: godot --headless --path . --script res://tests/web_ui_p6_hub_geometry_test.gd
+
       - name: Main-scene smoke test
         shell: bash
         run: |
